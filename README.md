@@ -1,2 +1,2 @@
-# single-loongarch-risc-cpu-icache-exp21
-uncache 还没完成
+# single-loongarch-risc-cpu
+完成CPU设计实战的23个实验并启动Linux系统
