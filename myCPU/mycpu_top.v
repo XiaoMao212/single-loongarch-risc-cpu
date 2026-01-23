@@ -112,7 +112,15 @@ module mycpu_top(
     wire        data_uncached; // 确保 mycpu_core 已添加此端口
     
     wire        data_finish;
-wire            data_prepared;
+    wire        data_prepared;
+    //exp23
+wire         ms_cacop_req_i;   // 请求 I-Cache
+wire         ms_cacop_req_d;   // 请求 D-Cache
+wire [ 4:0]  ms_cacop_op_code; // CACOP 操作码
+wire         icache_cacop_done;
+wire         dcache_cacop_done; // D-Cache 完成信号
+wire [31:0]  ms_cacop_addr;
+wire [31:0]  es_va;
     // -----------------------------------------------------------
     // 1. CPU Core 实例化
     // -----------------------------------------------------------
@@ -153,7 +161,14 @@ wire            data_prepared;
         
         // Uncached 属性
         .uncached          (inst_uncached    ), 
-        .data_uncached     (data_uncached)      // 必须确保 Core 输出了这个信号
+        .data_uncached     (data_uncached)   ,   // 必须确保 Core 输出了这个信号
+        .es_va             (es_va),
+        .ms_cacop_req_i   (ms_cacop_req_i),
+        .ms_cacop_req_d   (ms_cacop_req_d),
+        .ms_cacop_addr    (ms_cacop_addr),
+        .ms_cacop_op_code (ms_cacop_op_code),
+        .icache_cacop_done(icache_cacop_done),
+        .dcache_cacop_done(dcache_cacop_done)
     );
 
     // -----------------------------------------------------------
@@ -192,7 +207,11 @@ wire            data_prepared;
         .wr_addr    (),
         .wr_wstrb   (),
         .wr_data    (),
-        .wr_rdy     (1'b1) 
+        .wr_rdy     (1'b1) ,
+        .cacop_req  (ms_cacop_req_i       ),
+        .cacop_op      (ms_cacop_op_code     ),
+        .cacop_addr (ms_cacop_addr        ),
+        .cacop_complete(icache_cacop_done)
     );
 
     // -----------------------------------------------------------
@@ -206,9 +225,9 @@ wire            data_prepared;
         .uncached   (data_uncached),
         .valid      (data_sram_req        ),
         .op         (data_sram_wr         ),
-        .index      (data_sram_addr[11:4] ), // 这里用 PA 作为 Index (PIPT)
+        .index      (es_va[11:4] ), 
         .tag        (data_sram_addr[31:12]),
-        .offset     (data_sram_addr[3:0]  ),
+        .offset     (es_va[3:0]  ),
         .wstrb      (data_sram_wstrb      ),
         .wdata      (data_sram_wdata      ),
         
@@ -232,7 +251,11 @@ wire            data_prepared;
         .wr_data    (dcache_wr_data       ),
         .wr_rdy     (dcache_wr_rdy        ),
         .data_finish (data_finish          ),
-        .data_prepared(data_prepared        )
+        .data_prepared(data_prepared        ),
+        .cacop_req  (ms_cacop_req_d       ),
+        .cacop_op      (ms_cacop_op_code     ),
+        .cacop_addr (ms_cacop_addr       ),
+        .cacop_complete(dcache_cacop_done)
     );
 
     // -----------------------------------------------------------

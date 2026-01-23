@@ -150,6 +150,10 @@ wire        inst_tlbwr;
 wire        inst_tlbfill;
 wire        inst_invtlb;
 
+
+//exp23
+wire        inst_cacop;
+
 wire        need_ui5;
 wire        need_si12;
 wire        need_si16;
@@ -287,11 +291,12 @@ assign inst_tlbwr   = op_31_26_d[6'h01] & op_25_22_d[4'h9] & op_21_20_d[2'h0] & 
 assign inst_tlbfill = op_31_26_d[6'h01] & op_25_22_d[4'h9] & op_21_20_d[2'h0] & op_19_15_d[5'h10] & (rk == 5'h0d) & (rj == 5'h00) & (rd == 5'h00); 
 assign inst_invtlb  = op_31_26_d[6'h01] & op_25_22_d[4'h9] & op_21_20_d[2'h0] & op_19_15_d[5'h13];
 
-
+//exp23
+assign inst_cacop   = op_31_26_d[6'h01] & op_25_22_d[4'h8];
 
 assign alu_op[ 0] = inst_add_w | inst_addi_w | inst_ld_w | inst_st_w
                     | inst_jirl | inst_bl |  inst_pcaddu12i | inst_ld_b
-                    | inst_ld_h | inst_ld_bu | inst_ld_hu | inst_st_b | inst_st_h;
+                    | inst_ld_h | inst_ld_bu | inst_ld_hu | inst_st_b | inst_st_h | inst_cacop;
 assign alu_op[ 1] = inst_sub_w;
 assign alu_op[ 2] = inst_slt | inst_slti;
 assign alu_op[ 3] = inst_sltu | inst_sltui;
@@ -314,7 +319,7 @@ assign alu_op[18] = inst_mod_wu;
 assign need_ui5   =  inst_slli_w | inst_srli_w | inst_srai_w;
 assign need_si12  =  inst_addi_w | inst_ld_w | inst_st_w | inst_slti | inst_sltui | inst_ld_b 
                      | inst_ld_h | inst_ld_bu | inst_ld_hu | inst_st_b | inst_st_h;
-assign need_si16  =  inst_jirl | inst_beq | inst_bne | inst_blt | inst_bge | inst_bltu | inst_bgeu;
+assign need_si16  =  inst_jirl | inst_beq | inst_bne | inst_blt | inst_bge | inst_bltu | inst_bgeu | inst_cacop;
 assign need_si20  =  inst_lu12i_w | inst_pcaddu12i;
 assign need_si26  =  inst_b | inst_bl;
 assign src2_is_4  =  inst_jirl | inst_bl;
@@ -334,6 +339,7 @@ assign br_offs = need_si26 ? {{ 4{i26[25]}}, i26[25:0], 2'b0} :
 
 assign jirl_offs = {{14{i16[15]}}, i16[15:0], 2'b0};
 
+//cacop_code
 wire  [4:0] invtlb_op;
 assign invtlb_op  = rd;
 
@@ -365,7 +371,8 @@ assign src2_is_imm   = inst_slli_w |
                        inst_ld_bu  | 
                        inst_ld_hu  |
                        inst_st_b   | 
-                       inst_st_h;
+                       inst_st_h   |
+                       inst_cacop;
 
 //结果来自dataRAM
 assign res_from_mem  =inst_ld_w | inst_ld_b | inst_ld_h | inst_ld_bu | inst_ld_hu;
@@ -379,7 +386,7 @@ assign gr_we         = ~inst_st_w & ~inst_beq & ~inst_bne & ~inst_b & ~inst_blt
                        & ~inst_bge & ~inst_bltu & ~inst_bgeu & ~inst_st_b & ~inst_st_h 
                        & ~inst_syscall & ~inst_ertn& ~inst_break 
                        & ~inst_tlbrd & ~inst_tlbwr & ~inst_tlbfill & ~inst_tlbsrch 
-                       & ~inst_invtlb;
+                       & ~inst_invtlb & ~inst_cacop;
 //内存写使能
 assign mem_we        = inst_st_w | inst_st_b | inst_st_h;
 //目的寄存器
@@ -392,11 +399,11 @@ assign rf_raddr2 = src_reg_is_rd ? rd :rk;
 //以下四条指令没有目的操作数，当inst_no_dest为1时，表明没有目的操作数需要比较
 //assign inst_no_dest = inst_st_w | inst_bne | inst_beq | inst_b | inst_st_b | inst_st_h | inst_blt | inst_bge | inst_bltu | inst_bgeu | inst_syscall | inst_ertn;
 //判断当前译码指令的源操作数是哪些
-assign src_no_rj    = inst_b | inst_bl | inst_lu12i_w | inst_pcaddu12i | inst_tlbsrch | inst_tlbrd | inst_tlbwr | inst_tlbfill;
+assign src_no_rj    = inst_b | inst_bl | inst_lu12i_w | inst_pcaddu12i | inst_tlbsrch | inst_tlbrd | inst_tlbwr | inst_tlbfill ;
 assign src_no_rk    = inst_slli_w | inst_srli_w | inst_srai_w | inst_addi_w | inst_ld_w | inst_st_w | inst_jirl | 
                       inst_b | inst_bl | inst_beq | inst_bne | inst_lu12i_w |inst_slti | inst_sltui | inst_andi | 
                       inst_ori | inst_xori | inst_pcaddu12i | inst_blt |inst_bge | inst_bltu | inst_bgeu | inst_ld_b | inst_ld_h | inst_ld_bu|
-                      inst_ld_hu | inst_st_b | inst_st_h | inst_tlbsrch | inst_tlbrd | inst_tlbwr | inst_tlbfill;
+                      inst_ld_hu | inst_st_b | inst_st_h | inst_tlbsrch | inst_tlbrd | inst_tlbwr | inst_tlbfill | inst_cacop;
 //以下三种指令的源操作数有rd，其他指令rd均不作为源操作数
 assign src_no_rd    = ~inst_st_w & ~inst_beq & ~inst_bne & ~inst_st_b & ~inst_st_h & ~inst_blt & ~inst_bge & ~inst_bltu & ~inst_bgeu & ~inst_csrwr & ~inst_csrxchg
                       & ~inst_tlbsrch & ~inst_tlbrd & ~inst_tlbwr & ~inst_tlbfill & ~inst_invtlb;
@@ -497,7 +504,8 @@ assign ds_to_es_bus = {fs_tlb_ex   ,
                        inst_tlbwr   ,
                        inst_tlbfill ,
                        inst_invtlb  ,
-                       invtlb_op
+                       invtlb_op    ,
+                       inst_cacop
                     };
 
 
@@ -592,8 +600,8 @@ assign ds_ine      = ~(inst_add_w     | inst_sub_w   | inst_slt     | inst_sltu 
                        inst_st_b      | inst_st_h    | inst_csrrd   | inst_csrwr     |
                        inst_csrxchg   | inst_ertn    | inst_syscall | inst_break     |
                        inst_rdcntvl   | inst_rdcntvh | inst_rdcntid | inst_tlbsrch   |
-                       inst_tlbrd     | inst_tlbwr   | inst_tlbfill | inst_invtlb)   |
-                       inst_invtlb & (invtlb_op > 5'd6);
+                       inst_tlbrd     | inst_tlbwr   | inst_tlbfill | inst_invtlb    |
+                       inst_cacop)    |inst_invtlb & (invtlb_op > 5'd6);
 
 assign ds_ex       = ds_valid & (inst_syscall | inst_break | ds_ine | ds_has_int | ds_adef| (|fs_exc_ecode));
 assign fs_tlb_ex   = |fs_exc_ecode;

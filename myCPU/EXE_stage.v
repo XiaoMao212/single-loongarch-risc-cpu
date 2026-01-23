@@ -57,7 +57,8 @@ module exe_stage(
     input  [31:0]                  pa,
     input  [ 1:0]                  plv,
     input                          dmw_hit  ,
-    output [2:0] exe_need_mem_forward
+    output [2:0] exe_need_mem_forward,
+    input        ms_need_mem
 );
 
 reg         es_valid      ;
@@ -119,6 +120,11 @@ wire         fs_tlb_ex;
 wire         ecode_pil;
 wire         ecode_pis;
 wire         ecode_pme;
+
+
+//exp23
+wire       es_inst_cacop;
+wire [4:0] es_cacop_op;
 assign{ fs_tlb_ex,
         alu_op,
         es_load_op,
@@ -142,8 +148,14 @@ assign{ fs_tlb_ex,
         es_inst_tlbwr,     
         es_inst_tlbfill,   
         es_inst_invtlb,   
-        es_invtlb_op
+        es_invtlb_op  ,
+        es_inst_cacop
        } = ds_to_es_bus_r;
+//exp23
+assign  es_cacop_op = es_invtlb_op;
+wire es_ipe;
+assign es_ipe = (es_inst_cacop) & (plv != 2'd0);
+
 
 wire [31:0] alu_src1   ;
 wire [31:0] alu_src2   ;
@@ -168,7 +180,9 @@ assign es_to_ms_bus ={es_adem,
                        dest        ,  //68:64 5
                        es_final_result,  //63:32 32
                        es_pc       ,    //31:0  32
-                       es_exception
+                       es_exception,
+                       es_inst_cacop,
+                       es_cacop_op
                       };
 
 assign tlbsrch_blk    = es_inst_tlbsrch & (ms_tlb_forward | ws_tlb_forward);
@@ -181,7 +195,7 @@ assign invtlb_op      = es_invtlb_op;
 
 //dout_tvalid为1时，除法运算完成
 //assign es_ready_go    = inst_is_div ? (dout_tvalid | doutu_tvalid) : 1'b1;
-assign es_allowin     = !es_valid || es_ready_go && ms_allowin;
+assign es_allowin     = !es_valid || es_ready_go && ms_allowin  ;
 assign es_to_ms_valid =  es_valid && es_ready_go && (~es_reflush);
 always @(posedge clk) begin
     if (reset) begin
@@ -345,6 +359,7 @@ assign es_ecode      = ds_ex    ? ds_ecode
                      : es_tlb_ecode[4] ? `ECODE_PIS
                      : es_tlb_ecode[1] ? `ECODE_PPI
                      : es_tlb_ecode[2] ? `ECODE_PME
+                     : es_ipe  ?  `ECODE_IPE  //exp23
                      : 6'h0;
 assign es_esubcode   =  es_adem ? `ESUBCODE_ADEM : ds_esubcode;
 assign es_ex         = (ds_ex | es_ale | es_adem | (|es_tlb_ecode)) & es_valid;
@@ -352,7 +367,7 @@ assign es_exception  = {csr_re, csr_we, csr_wmask, csr_wvalue, csr_num, es_ex, e
                         es_wrong_addr, es_ecode, es_esubcode};
                         
 assign mmu_en         = {{1'b0},{es_need_mem}};
-assign ecode_pil      = es_exc_ecode[5] & res_from_mem;
+assign ecode_pil      = es_exc_ecode[5] & (res_from_mem|| es_inst_cacop);
 assign ecode_pis      = es_exc_ecode[4] & es_mem_we;
 assign ecode_pme      = es_exc_ecode[2] & es_mem_we;
 assign es_tlb_ecode   = {ecode_pil , ecode_pis, es_exc_ecode[3] , ecode_pme , es_exc_ecode[1] , es_exc_ecode[0]} & {6{es_need_mem}};
@@ -368,15 +383,16 @@ assign es_final_result  = {32{time_op[0]}}                & counter[31: 0]
                         | {32{~time_op[0] & ~time_op[1]}} & alu_result;
                         
 //exp14
-assign es_need_mem    = es_valid && (res_from_mem || es_mem_we) ;
+assign es_need_mem    = es_valid && (res_from_mem || es_mem_we || es_inst_cacop && es_cacop_op[4:3] == 2'b10) ;
 assign es_esubcode   =  es_adem ? `ESUBCODE_ADEM : ds_esubcode;
 //assign es_ex         = (ds_ex | es_ale | es_adem | (|es_tlb_ecode)) & es_valid;
 //exp22
-assign es_ready_go    = es_reflush?  1:
-                        es_need_mem ? (data_sram_en && data_sram_addr_ok && !tlbsrch_blk || es_ex || tlbsrch_blk):
-                        inst_is_div ? (dout_tvalid | doutu_tvalid) : (es_valid && !tlbsrch_blk);  
+assign es_ready_go = es_reflush ? 1 :
+                     es_need_mem ? (data_sram_en && data_sram_addr_ok && !tlbsrch_blk || es_ex || tlbsrch_blk || es_inst_cacop) :
+                     inst_is_div ? (dout_tvalid | doutu_tvalid) : (es_valid && !tlbsrch_blk); 
+
 //exp22   
-assign data_sram_en    = ms_allowin && es_need_mem && ~ms_ex && ~es_reflush && ~es_ex  && ~tlbsrch_blk;
+assign data_sram_en    = ms_allowin && es_need_mem && ~ms_ex && ~es_reflush && ~es_ex  && ~tlbsrch_blk && !es_inst_cacop;
 assign data_sram_we    = es_mem_we && (es_valid & ~ms_ex & ~es_reflush & ~st_ale & ~(|es_tlb_ecode)) ? 
                         (es_store_op == 2'b01 ? st_b : (es_store_op == 2'b10 ? st_h : 4'hf)) : 4'h0;
 assign data_sram_addr  = pa;

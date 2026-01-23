@@ -3,8 +3,8 @@
 
     `define BR_BUS_WD       34
     `define FS_TO_DS_BUS_WD 103
-    `define DS_TO_ES_BUS_WD 306
-    `define ES_TO_MS_BUS_WD 215
+    `define DS_TO_ES_BUS_WD 307
+    `define ES_TO_MS_BUS_WD 221
     `define MS_TO_WS_BUS_WD 208
     `define WS_TO_RF_BUS_WD 38
     `define WS_TO_CSR_BUS   200
@@ -108,6 +108,6 @@
     `define ECODE_PPI           6'h7 
     `define ECODE_TLBR          6'h3f
     `define ESUBCODE_ADEM       9'h1
-
+    `define ECODE_IPE           6'h0E
 
 `endif

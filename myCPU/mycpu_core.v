@@ -46,7 +46,15 @@ module mycpu_core(
     output [31:0] fs_va,
     output ws_reflush,
     output uncached,
-    output data_uncached  
+    output data_uncached  ,
+    output [31:0] es_va,
+    //exp23
+    output                         ms_cacop_req_i,   // 请求 I-Cache
+    output                         ms_cacop_req_d,   // 请求 D-Cache
+    output [ 4:0]                  ms_cacop_op_code, // CACOP 操作码
+    output [31:0]                  ms_cacop_addr,    // CACOP 操作地址 (虚地址)
+    input                          icache_cacop_done,// I-Cache 完成信号
+    input                          dcache_cacop_done // D-Cache 完成信号
 
 );
 reg         reset;
@@ -183,6 +191,9 @@ wire[1 :0] es_mmu_en;
 
 //exp21
 wire [2:0] exe_need_mem_forward;
+
+wire ms_need_mem;
+
 // IF stage
 if_stage if_stage(
     .clk            (clk            ),
@@ -328,7 +339,8 @@ exe_stage exe_stage(
     .va                     (es_va),
     .pa                     (es_pa),
     .mmu_en                 (es_mmu_en),
-    .exe_need_mem_forward   (exe_need_mem_forward)
+    .exe_need_mem_forward   (exe_need_mem_forward),
+    .ms_need_mem    (ms_need_mem)
 );
 
 MMU EXE_mmu(
@@ -381,7 +393,14 @@ mem_stage mem_stage(
     .ms_csr_re       (ms_csr_re),
     .s1_found         (s1_found),
     .s1_index         (s1_index),
-    .ms_tlb_forward   (ms_tlb_forward)
+    .ms_tlb_forward   (ms_tlb_forward),
+    .ms_cacop_req_i   (ms_cacop_req_i),
+    .ms_cacop_req_d   (ms_cacop_req_d),
+    .ms_cacop_op_code (ms_cacop_op_code),
+    .ms_cacop_addr    (ms_cacop_addr),
+    .icache_cacop_done(icache_cacop_done),
+    .dcache_cacop_done(dcache_cacop_done),
+    .ms_need_mem(ms_need_mem)
 );
 // WB stage
 wb_stage wb_stage(

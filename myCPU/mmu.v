@@ -71,7 +71,7 @@ assign tlb_paddr = (s_ps == 6'd12) ? {s_ppn[19:0], va[11:0]} : {s_ppn[19:10], va
 /**
 TLB相关例外?
 */
-assign ecode_pif  = tlb_trans & ~s_v;                     // 取指操作页无效
+assign ecode_pif  = flag[0] ? 1'b0 : tlb_trans & ~s_v;                     // 取指操作页无效
 assign ecode_ppi  = tlb_trans & ((csr_crmd_plv > s_plv)); // 页特权等级不合规
 assign ecode_tlbr = tlb_trans & ~s_found;                 // TLB重填例外
 assign ecode_pil  = flag[1] ? 1'b0 : tlb_trans & ~s_v;    // load?操作页无效
