@@ -285,7 +285,7 @@ module axi_bridge(
 
             WRITE_START: begin
                 // 原逻辑在这里直接跳 WRITE_END，现在需要发完所有 Burst 数据
-                if(wvalid & wready & wlast_reg) // 只有当发完最后一个才结束
+                if(wvalid & wready & (w_count == awlen_reg[1:0])) // 只有当发完最后一个才结束
                     aww_next_state = WRITE_END;
                 else
                     aww_next_state = aww_cur_state;
@@ -299,7 +299,12 @@ module axi_bridge(
                 aww_next_state = WRITE_INIT;
         endcase
     end
-
+wire wlast_wire;
+// 当计数器达到长度限制，且当前正在握手时，wlast 立即为 1
+assign wlast_wire = (w_count == awlen_reg); 
+    
+ // 输出端口直接连 wire
+ assign wlast = wlast_wire & wvalid_reg; // 只有 valid 有效时 last 才有效
     // AW 和 数据锁存逻辑
     always @(posedge clk) begin
         if(reset) begin
@@ -316,15 +321,19 @@ module axi_bridge(
         else if(awready && awvalid) begin
             awvalid_reg <= 1'b0; // 地址握手完成
         end
-        else if(aww_cur_state == WRITE_INIT && aww_next_state == WRITE_START) begin
+        else if(aww_cur_state == WRITE_INIT && aww_next_state == WRITE_START ) begin
+       //else if(aww_cur_state == WRITE_START) begin
+       //else if(dcache_rd_req) begin
             // 锁存请求
             awaddr_reg <= dcache_wr_addr;
             awsize_reg  <= {1'b0, data_sram_size};
             awvalid_reg <= 1'b1;
             
-            wdata_buffer <= dcache_wr_data;
+          // wdata_buffer <= dcache_wr_data;
             w_count      <= 2'd0;
-            
+            if(aww_cur_state == WRITE_START) begin
+              wdata_buffer <= dcache_wr_data;
+             end           
             // 判断是否是 Block 写 (3'b100)
             if (dcache_wr_type == 3'b100) begin
                 awlen_reg <= 8'd3; // 4 beats
@@ -340,16 +349,16 @@ module axi_bridge(
         // Burst 发送逻辑
         if (aww_cur_state == WRITE_START) begin
             // 生成 wlast
-            if (w_count == awlen_reg[1:0]) 
-                wlast_reg <= 1'b1;
-            else 
-                wlast_reg <= 1'b0;
+          //  if (w_count == awlen_reg[1:0]) 
+           //     wlast_reg <= 1'b1;
+           // else 
+           //     wlast_reg <= 1'b0;
 
             // 握手成功，准备下一个数据
             if (wvalid && wready) begin
-                if (wlast_reg) begin
+                if (wlast_wire) begin
                     wvalid_reg <= 1'b0; // 全部发完
-                    wlast_reg  <= 1'b0;
+                    w_count  <= 1'b0;
                 end else begin
                     w_count <= w_count + 1'b1; // 继续发下一个
                 end
@@ -384,7 +393,7 @@ module axi_bridge(
     assign wid      = 4'b1;
     assign wdata    = wdata_reg;
     assign wstrb    = wstrb_reg;
-    assign wlast    = wlast_reg;
+    //assign wlast    = wlast_reg;
     assign wvalid   = wvalid_reg;
 
     // ---------------------------------------------------------------

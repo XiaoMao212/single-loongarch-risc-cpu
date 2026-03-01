@@ -89,6 +89,29 @@ reg  [       1:0] tlb_mat1     [TLBNUM-1:0];
 reg               tlb_d1       [TLBNUM-1:0];
 reg               tlb_v1       [TLBNUM-1:0];
 
+// 仅用于仿真初始化，消除红线 X
+integer k;
+initial begin
+    for (k = 0; k < TLBNUM; k = k + 1) begin
+        tlb_e[k]     = 1'b0;
+        tlb_ps4MB[k] = 1'b0;
+        tlb_vppn[k]  = 19'b0;
+        tlb_asid[k]  = 10'b0;
+        tlb_g[k]     = 1'b0;
+        
+        tlb_ppn0[k]  = 20'b0;
+        tlb_plv0[k]  = 2'b0;
+        tlb_mat0[k]  = 2'b0;
+        tlb_d0[k]    = 1'b0;
+        tlb_v0[k]    = 1'b0;
+
+        tlb_ppn1[k]  = 20'b0;
+        tlb_plv1[k]  = 2'b0;
+        tlb_mat1[k]  = 2'b0;
+        tlb_d1[k]    = 1'b0;
+        tlb_v1[k]    = 1'b0;
+    end
+end
 // search inst
 wire [TLBNUM - 1: 0] match0;
 wire [TLBNUM - 1: 0] match1;
