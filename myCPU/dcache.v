@@ -1,477 +1,654 @@
-module dcache(
-    input        clk        ,
-    input        resetn     ,
-    // 新增：Uncached 信号
-    input        uncached   , // <--- 新增端口
+module dcache
+(
+    input               clk          ,
+    input               resetn        ,
+    //to from cpu
+    input               valid        ,
+    input               op           , //cache inst treat as load, op is zero
+    input  [ 2:0]       size         ,
+    input  [ 7:0]       index        ,
+    input  [19:0]       tag          ,
+    input  [ 3:0]       offset       ,
+    input  [ 3:0]       wstrb        ,
+    input  [31:0]       wdata        ,
+    output              addr_ok      ,
+    output              data_ok      ,
+    output [31:0]       rdata        ,
+    input               uncache_en   ,
+    input               dcacop_op_en ,
+    input  [ 1:0]       cacop_op_mode,
+    input  [ 4:0]       preld_hint   ,
+    input               preld_en     ,
+    input               tlb_excp_cancel_req,
+    input               sc_cancel_req,
+	output              dcache_empty ,
+    //to from axi
+    output              rd_req       ,
+    output [ 2:0]       rd_type      ,
+    output [31:0]       rd_addr      ,
+    input               rd_rdy       ,
+    input               ret_valid    ,
+    input               ret_last     ,
+    input  [31:0]       ret_data     ,
+    output reg          wr_req       ,
+    output [ 2:0]       wr_type      ,
+    output [31:0]       wr_addr      ,
+    output [ 3:0]       wr_wstrb     ,
+    output [127:0]      wr_data      ,
+    input               wr_rdy       ,
+    //to perf_counter
+    output              cache_miss   
+);
+reg         reset;
+always @(posedge clk) begin
+     reset <= ~resetn;
+end
+reg [1:0] way_d_reg [255:0];
 
-    // Cache and CPU
-    input   wire      valid     , // request is valid
-    input         op        , // the request type(write is 1 and read is 0)
-    input  [ 7:0] index     , // the index of address
-    input  [19:0] tag       , // paddr's tag
-    input  [ 3:0] offset    , // the offset of address
-    input  [ 3:0] wstrb     , // the write byte enable signal
-    input  [31:0] wdata     , // the write data
-    output        addr_ok   , // the request's address transport is ok
-    output        data_ok   , // the request's data transport is ok
-    output [31:0] rdata     , // the result of read cache
-    
-    // Cache and AXI
-    output        rd_req    , // the read request is valid
-    output [  2:0] rd_type  , // the read request type
-    output [ 31:0] rd_addr  , // the start address of read request
-    input         rd_rdy    , // the handshake signal
-    input         ret_valid , // the return data is valid
-    input         ret_last  , // the return data is one read request's last
-    input  [ 31:0] ret_data , // read return data
-    output        wr_req    , // write request valid
-    output [  2:0] wr_type  , // write request type
-    output [ 31:0] wr_addr  , // the start address of write request
-    output [  3:0] wr_wstrb , // the mask of write byte
-    output [127:0] wr_data  , // the write data
-    input         wr_rdy    ,  // the handshake signal    
-    input         data_finish,
-    input         data_prepared
+wire        request_uncache_en        ;
+reg         request_buffer_op         ;
+reg         request_buffer_preld      ;
+reg [ 2:0]  request_buffer_size       ;
+reg [ 7:0]  request_buffer_index      ;
+reg [19:0]  request_buffer_tag        ;
+reg [ 3:0]  request_buffer_offset     ;
+reg [ 3:0]  request_buffer_wstrb      ;
+reg [31:0]  request_buffer_wdata      ;
+reg         request_buffer_uncache_en ;
+reg         request_buffer_dcacop     ;
+reg [ 1:0]  request_buffer_cacop_op_mode;
+
+reg  [ 1:0]  miss_buffer_replace_way ;
+reg  [ 1:0]  miss_buffer_ret_num     ;
+wire [ 1:0]  ret_num_add_one         ;
+
+reg [ 7:0]  write_buffer_index      ;
+reg [ 3:0]  write_buffer_wstrb      ;
+reg [31:0]  write_buffer_wdata      ;
+reg [ 1:0]  write_buffer_way        ;
+reg [ 3:0]  write_buffer_offset     ;
+ 
+wire [ 7:0] way_bank_addra [1:0][3:0];
+wire [31:0] way_bank_dina  [1:0][3:0];
+wire [31:0] way_bank_douta [1:0][3:0];
+wire        way_bank_ena   [1:0][3:0];
+wire [ 3:0] way_bank_wea   [1:0][3:0];
+
+wire [ 7:0] way_tagv_addra [1:0];
+wire [20:0] way_tagv_dina  [1:0];
+wire [20:0] way_tagv_douta [1:0];
+wire        way_tagv_ena   [1:0];
+wire        way_tagv_wea   [1:0];
+
+wire 		wr_match_way_bank[1:0][3:0];
+
+wire [ 1:0] way_d       ;
+
+wire [ 1:0] way_hit     ;
+wire        cache_hit   ;
+
+wire [31:0]  way_load_word [1:0];
+wire [127:0] way_data      [1:0];
+wire [31:0]  load_res           ;
+ 
+wire [127:0] replace_data    ;
+wire         replace_d       ;
+wire         replace_v       ;
+wire [19:0]  replace_tag     ;
+wire [ 1:0]  random_val      ;
+wire [ 3:0]  chosen_way      ;
+wire [ 1:0]  replace_way     ;
+wire [ 1:0]  invalid_way     ;
+wire         has_invalid_way ;
+wire [ 1:0]  rand_repl_way   ;
+wire [ 3:0]  cacop_chose_way ;
+
+wire         main_idle2lookup  ;
+wire         main_lookup2lookup;
+
+wire         main_state_is_idle   ;
+wire         main_state_is_lookup ;
+wire         main_state_is_miss   ;
+wire         main_state_is_replace;
+wire         main_state_is_refill ;
+
+wire         write_state_is_idle;
+wire         write_state_is_full;
+
+wire         uncache_wr     ;
+reg          uncache_wr_buffer;
+wire [ 2:0]  uncache_wr_type;
+
+wire [ 1:0]  way_wr_en;
+
+wire [31:0]  refill_data;
+wire [31:0]  write_in;
+
+wire         cacop_op_mode0;
+wire         cacop_op_mode1;
+wire         cacop_op_mode2;
+
+wire         cacop_op_mode2_hit_wr;
+reg          cacop_op_mode2_hit_wr_buffer;
+
+wire         preld_st_en;
+wire         preld_ld_en;
+wire         preld_ld_st_en;
+
+wire         req_or_inst_valid;
+
+reg [1:0]    lookup_way_hit_buffer;
+
+localparam main_idle    = 5'b00001;
+localparam main_lookup  = 5'b00010;
+localparam main_miss    = 5'b00100;
+localparam main_replace = 5'b01000;
+localparam main_refill  = 5'b10000;
+localparam write_buffer_idle  = 1'b0;
+localparam write_buffer_write = 1'b1; 
+
+genvar i,j;
+
+reg [4:0] main_state;
+reg       write_buffer_state;
+
+reg       rd_req_buffer;
+
+// wire      invalid_way;
+
+wire cancel_req = tlb_excp_cancel_req || sc_cancel_req;
+
+//state machine
+//main loop
+always @(posedge clk) begin
+    if (reset) begin
+        main_state <= main_idle;
+
+        request_buffer_op         <=  1'b0;
+        request_buffer_preld      <=  1'b0;
+        request_buffer_size       <=  3'b0;
+        request_buffer_index      <=  8'b0;
+        request_buffer_tag        <= 20'b0;
+        request_buffer_offset     <=  4'b0;
+        request_buffer_wstrb      <=  4'b0;
+        request_buffer_wdata      <= 32'b0;
+        request_buffer_uncache_en <=  1'b0;
+
+        request_buffer_cacop_op_mode <= 2'b0;
+        request_buffer_dcacop        <= 1'b0;
+
+        miss_buffer_replace_way <= 2'b0;
+
+		wr_req <= 1'b0;
+    end
+    else case (main_state)
+        main_idle: begin
+            if (req_or_inst_valid && main_idle2lookup) begin
+                main_state <= main_lookup;
+
+                request_buffer_op         <= op        ;
+                request_buffer_preld      <= preld_en     ;
+                request_buffer_size       <= size      ;
+                request_buffer_index      <= index     ;
+                request_buffer_offset     <= offset    ;
+                request_buffer_wstrb      <= wstrb     ;
+                request_buffer_wdata      <= wdata     ;
+
+                request_buffer_cacop_op_mode <= cacop_op_mode ;
+                request_buffer_dcacop        <= dcacop_op_en  ;
+            end
+        end
+        main_lookup: begin
+            if (req_or_inst_valid && main_lookup2lookup) begin
+                main_state <= main_lookup;
+
+                request_buffer_op         <= op        ;
+                request_buffer_preld      <= preld_en  ;
+                request_buffer_size       <= size      ;
+                request_buffer_index      <= index     ;
+                request_buffer_offset     <= offset    ;
+                request_buffer_wstrb      <= wstrb     ;
+                request_buffer_wdata      <= wdata     ;
+
+                request_buffer_cacop_op_mode <= cacop_op_mode ;
+                request_buffer_dcacop        <= dcacop_op_en  ;
+            end
+            else if (cancel_req) begin
+                main_state <= main_idle;
+            end
+            else if (!cache_hit) begin
+				//uncache wr --> wr_req 1
+				//uncache rd, cacop(code==0) --> wr_req 0
+				//cacop(code==1, 2), cache st, cache ld --> wr_req (dirty && valid)
+				if (uncache_wr || ((replace_d && replace_v) && (!request_uncache_en || cacop_op_mode2_hit_wr) && !cacop_op_mode0))
+                	main_state <= main_miss;
+				else 
+					main_state <= main_replace;
+
+                request_buffer_tag        <= tag;
+                request_buffer_uncache_en <= request_uncache_en;
+				uncache_wr_buffer         <= uncache_wr;
+                miss_buffer_replace_way   <= replace_way;
+				cacop_op_mode2_hit_wr_buffer <= cacop_op_mode2_hit_wr;
+            end
+            else begin
+                main_state <= main_idle;
+            end
+        end
+        main_miss: begin
+            if (wr_rdy) begin
+                main_state <= main_replace;
+				wr_req <= 1'b1;
+            end
+        end
+        main_replace: begin
+            if (rd_rdy) begin
+                main_state <= main_refill;
+                miss_buffer_ret_num <= 2'b0;   //when get ret data, it will be sent to cpu directly.
+            end
+			wr_req <= 1'b0;
+        end
+        main_refill: begin
+            if ((ret_valid && ret_last) || !rd_req_buffer) begin   //when rd_req is not set, go to next state directly
+                main_state <= main_idle;
+            end
+            else begin
+                if (ret_valid) begin
+                    miss_buffer_ret_num <= ret_num_add_one;
+                end
+            end
+        end
+        default: begin
+            main_state <= main_idle;
+        end
+    endcase
+end
+
+//hit write state 
+always @(posedge clk) begin
+    if (reset) begin
+        write_buffer_state  <= write_buffer_idle;
+
+        write_buffer_index  <= 8'b0;
+        write_buffer_wstrb  <= 4'b0;
+        write_buffer_wdata  <= 32'b0;
+        write_buffer_offset <= 4'b0;
+        write_buffer_way    <= 2'b0;
+    end
+    else case (write_buffer_state)
+        write_buffer_idle: begin
+            if (main_state_is_lookup && cache_hit && request_buffer_op && !cancel_req) begin
+                write_buffer_state  <= write_buffer_write;
+
+                write_buffer_index  <= request_buffer_index;
+                write_buffer_wstrb  <= request_buffer_wstrb;
+                write_buffer_wdata  <= request_buffer_wdata;
+                write_buffer_offset <= request_buffer_offset;
+                write_buffer_way    <= way_hit;
+            end
+        end
+        write_buffer_write: begin
+            if (main_state_is_lookup && cache_hit && request_buffer_op && !cancel_req) begin
+                write_buffer_state  <= write_buffer_write;
+
+                write_buffer_index  <= request_buffer_index;
+                write_buffer_wstrb  <= request_buffer_wstrb;
+                write_buffer_wdata  <= request_buffer_wdata;
+                write_buffer_offset <= request_buffer_offset;
+                write_buffer_way    <= way_hit;
+            end
+            else begin
+                write_buffer_state <= write_buffer_idle;
+            end
+        end
+    endcase
+end
+
+/*====================================main state idle=======================================*/
+
+assign req_or_inst_valid = valid || dcacop_op_en || preld_en;
+
+//state change condition, write hit cache block write do not conflict with lookup read and cacop
+assign main_idle2lookup   = !(write_state_is_full && ((write_buffer_offset[3:2] == offset[3:2]) || dcacop_op_en));
+
+assign dcache_empty = main_state_is_idle;
+//addr_ok logic
+
+/*===================================main state lookup======================================*/
+
+//tag compare
+generate for(i=0;i<2;i=i+1) begin:gen_way_hit
+	assign way_hit[i] = way_tagv_douta[i][0] && (tag == way_tagv_douta[i][20:1]); //this signal will not maintain
+end endgenerate
+
+assign cache_hit = |way_hit && !(uncache_en || cacop_op_mode0 || cacop_op_mode1 || cacop_op_mode2);  //uncache road reuse
+//when cache inst op mode2 no hit, main state machine will still go a round. implement easy.
+
+assign main_lookup2lookup = !(write_state_is_full && ((write_buffer_offset[3:2] == offset[3:2]) || dcacop_op_en)) && 
+                            !(request_buffer_op  && !op && ((request_buffer_offset[3:2] == offset[3:2]) || dcacop_op_en)) &&
+                            cache_hit;
+ 
+assign addr_ok = (main_state_is_idle && main_idle2lookup) || (main_state_is_lookup && main_lookup2lookup); //request can be get
+
+//data select
+generate for(i=0;i<2;i=i+1) begin:gen_way_data
+	assign way_data[i] = {way_bank_douta[i][3],way_bank_douta[i][2],way_bank_douta[i][1],way_bank_douta[i][0]};
+
+	assign way_load_word[i] = way_data[i][request_buffer_offset[3:2]*32 +: 32];
+end endgenerate
+
+assign load_res = {32{way_hit[0]}} & way_load_word[0] |
+                  {32{way_hit[1]}} & way_load_word[1] ;
+
+assign request_uncache_en = (uncache_en && !request_buffer_dcacop);
+
+assign uncache_wr = request_uncache_en && request_buffer_op && !cacop_op_mode1 && !cacop_op_mode2_hit_wr;
+//data_ok logic
+
+decoder_2_4 dec_rand_way (.in({1'b0,random_val[0]}),.out(chosen_way));
+
+one_valid_n #(2) sel_one_invalid (.in(~{way_tagv_douta[1][0],way_tagv_douta[0][0]}),.out(invalid_way),.nozero(has_invalid_way));
+
+assign rand_repl_way = has_invalid_way ? invalid_way : chosen_way[1:0]; //chose invalid way first.
+
+decoder_2_4 dec_cacop_way (.in({1'b0,request_buffer_offset[0]}),.out(cacop_chose_way));
+
+assign replace_way = {2{cacop_op_mode0 || cacop_op_mode1}} & cacop_chose_way[1:0] |
+                     {2{cacop_op_mode2}}                   & way_hit              |
+                     {2{!request_buffer_dcacop}}           & rand_repl_way;
+
+assign way_d = way_d_reg[request_buffer_index] |
+	           {2{(write_buffer_index==request_buffer_index)&&write_state_is_full}}&write_buffer_way;
+
+assign replace_d    = |(replace_way & way_d);
+assign replace_v    = |(replace_way & {way_tagv_douta[1][0],way_tagv_douta[0][0]});
+
+/*====================================main state miss=======================================*/
+
+assign replace_tag  = {20{miss_buffer_replace_way[0]}} & way_tagv_douta[0][20:1] |
+					  {20{miss_buffer_replace_way[1]}} & way_tagv_douta[1][20:1] ;
+
+assign replace_data = {128{miss_buffer_replace_way[0]}} & way_data[0] | 
+				      {128{miss_buffer_replace_way[1]}} & way_data[1] ;
+
+assign wr_type  = uncache_wr_buffer ? uncache_wr_type : 3'b100;     //replace cache line
+assign wr_addr  = uncache_wr_buffer ? {request_buffer_tag, request_buffer_index, request_buffer_offset} :
+ 	                                  {replace_tag, request_buffer_index, 4'b0};
+assign wr_data  = uncache_wr_buffer ? {96'b0, request_buffer_wdata} : replace_data;
+assign wr_wstrb = uncache_wr_buffer ? request_buffer_wstrb : 4'hf;
+
+//assign wr_req = main_state_is_miss;
+
+/*==================================main state replace======================================*/
+
+assign uncache_wr_type = request_buffer_size;
+
+assign rd_req  = main_state_is_replace && !(uncache_wr_buffer || cacop_op_mode0 || cacop_op_mode1 || cacop_op_mode2);
+
+assign rd_type = request_buffer_uncache_en ? request_buffer_size : 3'b100;
+assign rd_addr = request_buffer_uncache_en ? {request_buffer_tag, request_buffer_index, request_buffer_offset} : {request_buffer_tag, request_buffer_index, 4'b0};
+/*===================================main state refill======================================*/
+
+//write process will not block pipeline
+//preld ins will not block pipeline      ps:preld is not real mem inst, this operation is controled in pipeline
+assign data_ok = ((main_state_is_lookup && (cache_hit || request_buffer_op || cancel_req)) || 
+                  (main_state_is_refill && (!request_buffer_op && (ret_valid && ((miss_buffer_ret_num == request_buffer_offset[3:2]) || request_buffer_uncache_en))))) && 
+                  !(request_buffer_preld || request_buffer_dcacop);  //when rd_req is not set, set data_ok directly.
+//rdate connect with ret_data dirctly. maintain one clock only
+
+assign write_in = {(request_buffer_wstrb[3] ? request_buffer_wdata[31:24] : ret_data[31:24]), 
+                   (request_buffer_wstrb[2] ? request_buffer_wdata[23:16] : ret_data[23:16]),
+                   (request_buffer_wstrb[1] ? request_buffer_wdata[15: 8] : ret_data[15: 8]),
+                   (request_buffer_wstrb[0] ? request_buffer_wdata[ 7: 0] : ret_data[ 7: 0])};
+
+assign refill_data = (request_buffer_op && (request_buffer_offset[3:2] == miss_buffer_ret_num)) ? write_in : ret_data; 
+
+assign way_wr_en = miss_buffer_replace_way & {2{ret_valid}};  //when rd_req is not set, ret_valid and ret_last will not be set. block will not be wr also.
+
+assign cache_miss = main_state_is_refill && ret_last && !(request_buffer_uncache_en || request_buffer_dcacop || request_buffer_preld);  
+
+//add one 
+assign ret_num_add_one[0] = miss_buffer_ret_num[0] ^ 1'b1;
+assign ret_num_add_one[1] = miss_buffer_ret_num[1] ^ miss_buffer_ret_num[0];
+
+always @(posedge clk) begin
+    if (reset) begin
+        rd_req_buffer <= 1'b0;
+    end
+    else if (rd_req) begin
+        rd_req_buffer <= 1'b1;
+    end
+    else if (main_state_is_refill && (ret_valid && ret_last)) begin
+        rd_req_buffer <= 1'b0;
+    end
+end
+
+/*==========================================================================================*/
+
+//refill or write state update dirty reg
+always @(posedge clk) begin
+    if (main_state_is_refill && ((ret_valid && ret_last) || !rd_req_buffer) && (!(request_buffer_uncache_en || cacop_op_mode0))) begin
+		way_d_reg[request_buffer_index][0] <= miss_buffer_replace_way[0] ? request_buffer_op : way_d_reg[request_buffer_index][0];
+		way_d_reg[request_buffer_index][1] <= miss_buffer_replace_way[1] ? request_buffer_op : way_d_reg[request_buffer_index][1];
+    end
+    else if (write_state_is_full) begin
+		way_d_reg[write_buffer_index] <= way_d_reg[write_buffer_index] | write_buffer_way;
+    end
+end
+
+//cache ins control signal
+assign cacop_op_mode0 = request_buffer_dcacop && (request_buffer_cacop_op_mode == 2'b00);
+assign cacop_op_mode1 = request_buffer_dcacop && ((request_buffer_cacop_op_mode == 2'b01) || (request_buffer_cacop_op_mode == 2'b11));
+assign cacop_op_mode2 = request_buffer_dcacop && (request_buffer_cacop_op_mode == 2'b10);
+
+assign cacop_op_mode2_hit_wr = cacop_op_mode2 && |way_hit;
+
+//output
+assign rdata = {32{main_state_is_lookup}} & load_res |
+               {32{main_state_is_refill}} & ret_data ;
+
+generate 
+for(i=0;i<2;i=i+1) begin:gen_data_way
+	for(j=0;j<4;j=j+1) begin:gen_data_bank
+/*===============================bank addra logic==============================*/
+
+		assign wr_match_way_bank[i][j] = write_state_is_full && (write_buffer_way[i] && (write_buffer_offset[3:2] == j[1:0]));
+
+		assign way_bank_addra[i][j] = wr_match_way_bank[i][j] ? write_buffer_index : ({8{addr_ok}}  & index                |    /*lookup*/
+						                                                              {8{!addr_ok}} & request_buffer_index); 
+
+/*===============================bank we logic=================================*/
+
+		assign way_bank_wea[i][j] = {4{wr_match_way_bank[i][j]}} & write_buffer_wstrb | 
+									{4{main_state_is_refill && (way_wr_en[i] && (miss_buffer_ret_num == j[1:0]))}} & 4'hf;
+
+/*===============================bank dina logic=================================*/
+
+		assign way_bank_dina[i][j] = {32{write_state_is_full}}  & write_buffer_wdata |
+                                     {32{main_state_is_refill}} & refill_data        ;
+
+/*===============================bank ena logic=================================*/
+
+		assign way_bank_ena[i][j] = (!(request_buffer_uncache_en || cacop_op_mode0)) || main_state_is_idle || main_state_is_lookup;
+	end
+end
+endgenerate
+
+generate
+for(i=0;i<2;i=i+1) begin:gen_tagv_way
+/*===============================tagv addra logic=================================*/
+
+assign way_tagv_addra[i] = {8{addr_ok }} & index                |
+                           {8{!addr_ok}} & request_buffer_index ; 
+
+/*===============================tagv ena logic=================================*/
+
+assign way_tagv_ena[i] = (!request_buffer_uncache_en) || main_state_is_idle || main_state_is_lookup;
+
+/*===============================tagv wea logic=================================*/
+
+assign way_tagv_wea[i] = miss_buffer_replace_way[i] && main_state_is_refill &&
+	                     ((ret_valid && ret_last) || cacop_op_mode0 || cacop_op_mode1 || cacop_op_mode2_hit_wr_buffer); //write at least 4B
+
+/*===============================tagv dina logic=================================*/
+
+assign way_tagv_dina[i] = (cacop_op_mode0 || cacop_op_mode1 || cacop_op_mode2_hit_wr_buffer) ? 21'b0 : {request_buffer_tag, 1'b1};
+end
+endgenerate
+/*==============================================================================*/
+
+generate
+for(i=0;i<2;i=i+1) begin:data_ram_way
+	for(j=0;j<4;j=j+1) begin:data_ram_bank
+		data_bank_sram u(
+    		.addra      (way_bank_addra[i][j]),
+    		.clka       (clk                 ),
+    		.dina       (way_bank_dina[i][j] ),
+    		.douta      (way_bank_douta[i][j]),
+    		.ena        (way_bank_ena[i][j]  ),
+    		.wea        (way_bank_wea[i][j]  )  
+		);
+	end
+end
+endgenerate
+
+generate
+for(i=0;i<2;i=i+1) begin:tagv_ram_way
+	//[20:1] tag     [0:0] v
+	tagv_sram u( 
+	    .addra      (way_tagv_addra[i]),
+	    .clka       (clk              ),
+	    .dina       (way_tagv_dina[i] ),
+	    .douta      (way_tagv_douta[i]),
+	    .ena        (way_tagv_ena[i]  ),
+	    .wea        (way_tagv_wea[i]  )
+	);
+end
+endgenerate
+
+lfsr lfsr(
+    .clk        (clk        ),
+    .reset      (reset      ),
+    .random_val (random_val )
 );
 
-// CPU to cache request type(op)
-parameter READ  = 1'b0;
-parameter WRITE = 1'b1;
+assign main_state_is_idle    = main_state == main_idle   ;
+assign main_state_is_lookup  = main_state == main_lookup ;
+assign main_state_is_miss    = main_state == main_miss   ;
+assign main_state_is_replace = main_state == main_replace;
+assign main_state_is_refill  = main_state == main_refill ;
 
-// cache to sram read/write type
-parameter BYTE      = 3'b000;
-parameter HALFWORD  = 3'b001;
-parameter WORD      = 3'b010;
-parameter BLOCK     = 3'b100; // Cache Line
+assign write_state_is_idle  = (write_buffer_state == write_buffer_idle) ;
+assign write_state_is_full = (write_buffer_state == write_buffer_write);
 
-// the in/output signal of tagv_ram and data_ram
-wire [ 7:0] tagv_addr;
-wire [20:0] tagv_wdata;
-wire [20:0] tagv_w0_rdata, tagv_w1_rdata;
-wire        tagv_w0_en, tagv_w1_en;
-wire        tagv_w0_we, tagv_w1_we;
-wire [ 7:0] data_addr;
-wire [31:0] data_wdata;
-wire [31:0] data_w0_b0_rdata, data_w0_b1_rdata, data_w0_b2_rdata, data_w0_b3_rdata, data_w1_b0_rdata, data_w1_b1_rdata, data_w1_b2_rdata, data_w1_b3_rdata;
-wire        data_w0_b0_en, data_w0_b1_en, data_w0_b2_en, data_w0_b3_en, data_w1_b0_en, data_w1_b1_en, data_w1_b2_en, data_w1_b3_en;
-wire [ 3:0] data_w0_b0_we, data_w0_b1_we, data_w0_b2_we, data_w0_b3_we, data_w1_b0_we, data_w1_b1_we, data_w1_b2_we, data_w1_b3_we;
-reg [255:0] dirty_way0;
-reg [255:0] dirty_way1;
+endmodule
 
-// the state
-wire lookup;
-wire hitwrite;
-wire replace;
-wire refill;
-// main FSM
-// 扩展状态机，增加 UNCACHED 状态
-parameter IDLE     = 6'b000001; // <--- 修改位宽
-parameter LOOKUP   = 6'b000010;
-parameter MISS     = 6'b000100;
-parameter REPLACE  = 6'b001000;
-parameter REFILL   = 6'b010000;
-parameter UNCACHED = 6'b100000; // <--- 新增状态
+`ifdef SIMU
+module data_bank_sram
+#(
+    parameter WIDTH = 32    ,
+    parameter DEPTH = 256
+)
+(
+    input  [ 7:0]          addra   ,
+    input                  clka    ,
+    input  [31:0]          dina    ,
+    output [31:0]          douta   ,
+    input                  ena     ,
+    input  [ 3:0]          wea      
+);
 
-reg [5:0] current_state; // <--- 修改位宽
-reg [5:0] next_state;    // <--- 修改位宽
+reg [31:0] mem_reg [255:0];
+reg [31:0] output_buffer;
 
-// write buffer FSM
-parameter WRITEBUF_IDLE  = 2'b01;
-parameter WRITEBUF_WRITE = 2'b10;
-reg [1:0] writebuf_cur_state;
-reg [1:0] writebuf_next_state;
+always @(posedge clka) begin
+    if (ena) begin
+        if (wea) begin
+            if (wea[0]) begin
+                mem_reg[addra][ 7: 0] <= dina[ 7: 0]; 
+            end 
 
-// request buffer
-reg        reg_op;
-reg [ 7:0] reg_index;
-reg [19:0] reg_tag;
-reg [ 3:0] reg_offset;
-reg [ 3:0] reg_wstrb;
-reg [31:0] reg_wdata;
-reg        reg_uncached; // <--- 新增：锁存 uncached 信号
+            if (wea[1]) begin
+                mem_reg[addra][15: 8] <= dina[15: 8];
+            end
 
-// tag compare
-wire        way0_v, way1_v;
-wire [19:0] way0_tag, way1_tag;
-wire        way0_hit, way1_hit;
-wire        cache_hit;
+            if (wea[2]) begin
+                mem_reg[addra][23:16] <= dina[23:16];
+            end
 
-// data select
-wire [127:0] way0_data, way1_data;
-wire [ 31:0] way0_load_word, way1_load_word;
-wire [ 31:0] load_res;
-
-// miss buffer
-reg  [ 1:0]  refill_word_counter; 
-wire         replace_way;
-wire [127:0] replace_data;
-
-// LFSR 
-reg [2:0] lfsr;
-
-// write buffer
-reg        write_way;
-reg [ 1:0] write_bank;
-reg [ 7:0] write_index;
-reg [ 3:0] write_strb;
-reg [31:0] write_data;
-
-// refill data
-wire [31:0] refill_word;
-wire [31:0] byte_word;
-// other 
-wire       replace_block_dirty;
-reg         reset;
-
-// 新增：检测 Uncached 写命中情况
-// 必须在 LOOKUP 阶段检测，因为 cache_hit 信号在 LOOKUP 阶段有效
-wire uncached_hit_invalidate = (current_state == LOOKUP) && (reg_op == WRITE) && reg_uncached && cache_hit;
-
-always @(posedge clk) begin
-    reset <= ~resetn;
-end     
-
-/**
-    main FSM
-*/
-always @(posedge clk) begin
-    if(reset)
-        current_state <= IDLE;
-    else 
-        current_state <= next_state;
-end
-
-always @(*) begin
-    case(current_state)
-    IDLE: begin
-        if(valid && (~read_write_hazard))
-            next_state = LOOKUP;
-        else
-            next_state = IDLE;
-    end
-    LOOKUP: begin
-       
-        // 在 LOOKUP 阶段发起请求，握手成功后再跳转
-        if (reg_uncached) begin
-            if (reg_op == READ && rd_rdy) 
-                next_state = UNCACHED;    // 读请求被接受，去等待数据
-            else if (reg_op == WRITE && wr_rdy)
-                next_state = UNCACHED;    // 写请求被接受，去等待完成(或直接回IDLE)
-            else
-                next_state = LOOKUP;      // 握手未成功，保持 LOOKUP
-        end
-        else if(cache_hit && (~valid || read_write_hazard || load_store_hazard)) begin
-            next_state = IDLE;
-        end
-        else if(cache_hit && valid) begin
-            next_state = LOOKUP;
+            if (wea[3]) begin
+                mem_reg[addra][31:24] <= dina[31:24];
+            end
         end
         else begin
-            next_state = MISS;
+            output_buffer <= mem_reg[addra];
         end
     end
-    MISS: begin
-        if(wr_rdy || (~replace_block_dirty))
-            next_state = REPLACE;
-        else
-            next_state = MISS;
-    end
-    REPLACE: begin
-        if(rd_rdy)
-            next_state = REFILL;
-        else
-            next_state = REPLACE;
-    end
-    REFILL: begin
-        if(ret_valid && ret_last)
-            next_state = IDLE;
-        else
-            next_state = REFILL;
-    end
-    // UNCACHED 状态处理
-    UNCACHED: begin
-        if (reg_op == READ && ret_valid) 
-            next_state = IDLE; // 读到数据就结束
-        else if (reg_op == WRITE && data_finish) 
-            next_state = IDLE; // 写响应完成 
-        else 
-            next_state = UNCACHED;
-    end
-    default:
-        next_state = IDLE;
-    endcase
 end
 
-/**
-    write buffer FSM (保持不变)
-*/
+assign douta = output_buffer;
+
+endmodule 
+
+module tagv_sram
+#( 
+    parameter WIDTH = 21    ,
+    parameter DEPTH = 256
+)
+( 
+    input  [ 7:0]          addra   ,
+    input                  clka    ,
+    input  [20:0]          dina    ,
+    output [20:0]          douta   ,
+    input                  ena     ,
+    input                  wea 
+);
+
+reg [20:0] mem_reg [255:0];
+reg [20:0] output_buffer;
+
+always @(posedge clka) begin
+    if (ena) begin
+        if (wea) begin
+            mem_reg[addra] <= dina;
+        end
+        else begin
+            output_buffer <= mem_reg[addra];
+        end
+    end
+end
+
+assign douta = output_buffer;
+
+endmodule
+`endif
+
+module lfsr
+( 
+    input           clk         ,
+    input           reset       ,
+
+    output [1:0]    random_val  
+);
+
+reg [7:0] r_lfsr;
+
 always @(posedge clk) begin
-    if(reset)
-        writebuf_cur_state <= WRITEBUF_IDLE;
-    else
-        writebuf_cur_state <= writebuf_next_state;
-end
-
-always @(*) begin
-    case(writebuf_cur_state)
-    WRITEBUF_IDLE: begin
-        // 注意：Uncached 模式下不会触发 hitwrite
-        if((current_state == LOOKUP) && (reg_op == WRITE) && cache_hit && !reg_uncached)
-            writebuf_next_state = WRITEBUF_WRITE;
-        else
-            writebuf_next_state = WRITEBUF_IDLE;
+    if (reset) begin
+        r_lfsr <= 8'b1;
     end
-    WRITEBUF_WRITE: begin
-        if((current_state == LOOKUP) && (reg_op == WRITE) && cache_hit && !reg_uncached)
-            writebuf_next_state = WRITEBUF_WRITE;
-        else
-            writebuf_next_state = WRITEBUF_IDLE;
-    end
-    default:
-        writebuf_next_state = WRITEBUF_IDLE;
-    endcase
-end
-
-/**
-    data path other than Cache table
-*/
-// request buffer
-always @(posedge clk) begin
-    if(reset) begin
-        reg_op     <= 1'b0;
-        reg_index  <= 8'b0;
-        reg_tag    <= 20'b0;
-        reg_offset <= 4'b0;
-        reg_wstrb  <= 4'b0;
-        reg_wdata  <= 32'b0;
-        reg_uncached <= 1'b0; // <--- Reset
-    end
-    else if(lookup == 1) begin
-        reg_op     <= op;
-        reg_index  <= index;
-        reg_tag    <= tag;
-        reg_offset <= offset;
-        reg_wstrb  <= wstrb;
-        reg_wdata  <= wdata;
-        reg_uncached <= uncached; // <--- Latch uncached signal
+    else begin
+        r_lfsr[0] <= r_lfsr[7];
+        r_lfsr[1] <= r_lfsr[0];
+        r_lfsr[2] <= r_lfsr[1];
+        r_lfsr[3] <= r_lfsr[2];
+        r_lfsr[4] <= r_lfsr[3] ^ r_lfsr[7];
+        r_lfsr[5] <= r_lfsr[4] ^ r_lfsr[7];
+        r_lfsr[6] <= r_lfsr[5] ^ r_lfsr[7];
+        r_lfsr[7] <= r_lfsr[6];
     end
 end
 
-// Tag Compare
-assign {way0_tag, way0_v} = tagv_w0_rdata;
-assign {way1_tag, way1_v} = tagv_w1_rdata;
-assign way0_hit  = way0_v && (way0_tag == reg_tag);
-assign way1_hit  = way1_v && (way1_tag == reg_tag);
-assign cache_hit = (way0_hit || way1_hit); // Uncached 时忽略此信号
-
-// Data Select
-assign way0_data = {data_w0_b3_rdata, data_w0_b2_rdata, data_w0_b1_rdata, data_w0_b0_rdata};
-assign way1_data = {data_w1_b3_rdata, data_w1_b2_rdata, data_w1_b1_rdata, data_w1_b0_rdata};
-assign way0_load_word = way0_data[reg_offset[3:2]*32 +: 32];
-assign way1_load_word = way1_data[reg_offset[3:2]*32 +: 32];
-
-// <--- 修改：load_res 增加 Uncached 旁路数据选择
-assign load_res = {32{current_state == UNCACHED}} & ret_data | 
-                  {32{way0_hit}} & way0_load_word |
-                  {32{way1_hit}} & way1_load_word |
-                  {32{current_state == REFILL}} & ret_data;
-
-// miss buffer
-always @(posedge clk) begin
-    if(reset)
-        refill_word_counter <= 2'b0;
-    else if((current_state == REFILL) && (ret_valid == 1))
-        refill_word_counter <= refill_word_counter + 1'b1;
-end
-assign replace_way  = lfsr[0];
-assign replace_data = replace_way ? way1_data : way0_data;
-
-// LSFR
-always @(posedge clk) begin
-    if(reset) begin
-        lfsr <= 3'b111;
-    end
-    else if(ret_valid == 1 & ret_last == 1) begin
-        lfsr <= {lfsr[0], lfsr[2]^lfsr[0], lfsr[1]};
-    end
-end
-
-// write buffer
-always @(posedge clk) begin
-    if(reset) begin
-        write_way   <= 1'b0;
-        write_bank  <= 2'b0;
-        write_index <= 8'b0;
-        write_strb  <= 4'b0;
-        write_data  <= 32'b0;
-    end
-    else if((current_state == LOOKUP) && (reg_op == WRITE) && cache_hit && !reg_uncached) begin
-        write_way   <= way1_hit;
-        write_bank  <= reg_offset[3:2];
-        write_index <= reg_index;
-        write_strb  <= reg_wstrb;
-        write_data  <= reg_wdata;
-    end
-end
-
-// State Signals
-assign lookup    = (current_state == IDLE) && valid && (~read_write_hazard) ||
-                   (current_state == LOOKUP) && valid && cache_hit && (~read_write_hazard) && (~load_store_hazard) && (~reg_uncached); // <--- Add !reg_uncached
-assign hitwrite  = (writebuf_cur_state == WRITEBUF_WRITE);
-assign replace   = (current_state == MISS) || (current_state == REPLACE);
-assign refill    = (current_state == REFILL);
-
-// <--- lookup_en 修改：Uncached 时不需要启用 RAM 片选（省电）
-assign lookup_en = (current_state == IDLE) && valid && (~read_write_hazard) ||
-                   (current_state == LOOKUP) && valid && (~read_write_hazard) && (~load_store_hazard) && (~reg_uncached); 
-
-assign replace_block_dirty = (replace_way == 1'b0) && dirty_way0[reg_index] && way0_v ||
-                             (replace_way == 1'b1) && dirty_way1[reg_index] && way1_v;
-
-wire load_store_hazard = (current_state == LOOKUP) && (reg_op == WRITE) && valid && (op == READ)         
-                      && {tag, index, offset[3:2]} == {reg_tag, reg_index, offset[3:2]};
-wire read_write_hazard = (writebuf_cur_state == WRITEBUF_WRITE)  
-                       && valid && (op == READ) && (offset[3:2] == write_bank);
-
-assign byte_word = {{reg_wstrb[3] ? reg_wdata[31:24] : ret_data[31:24]},
-                    {reg_wstrb[2] ? reg_wdata[23:16] : ret_data[23:16]},
-                    {reg_wstrb[1] ? reg_wdata[15: 8] : ret_data[15: 8]},
-                    {reg_wstrb[0] ? reg_wdata[ 7: 0] : ret_data[ 7: 0]}};
-assign refill_word = ((refill_word_counter == reg_offset[3:2]) && (reg_op == WRITE))? byte_word : ret_data;
-
-// Dirty Tables
-always @(posedge clk) begin
-    if(reset) begin
-        dirty_way0 <= 256'b0;
-    end
-    else if(writebuf_cur_state == WRITEBUF_IDLE && ~write_way) begin
-        dirty_way0[write_index] <= 1'b0; // Clear dirty after write-back (Wait, this logic in original code clears dirty on write buffer idle? This implies WB logic. Assuming original is correct)
-    end
-    else if(refill) begin
-        if(replace_way == 1'b0 && reg_op == 1'b1)
-            dirty_way0[reg_index] <= 1'b1;
-        else
-            dirty_way0[reg_index] <= 1'b0; // Clean on refill (unless it's a write-miss refill)
-    end
-end
-always @(posedge clk) begin
-    if(reset) begin
-        dirty_way1 <= 256'b0;
-    end
-    else if(writebuf_cur_state == WRITEBUF_IDLE && write_way) begin
-        dirty_way1[write_index] <= 1'b0;
-    end
-    else if(refill) begin
-        if(replace_way == 1'b1 && reg_op == 1'b1)
-            dirty_way1[reg_index] <= 1'b1;
-        else
-            dirty_way1[reg_index] <= 1'b0;
-    end
-end
-
-// RAM Enables
-//assign tagv_w0_en = lookup_en || ((replace || refill) && (replace_way == 1'b0));
-//assign tagv_w1_en = lookup_en || ((replace || refill) && (replace_way == 1'b1));
-assign tagv_w0_en = lookup_en || ((replace || refill) && (replace_way == 1'b0)) || (uncached_hit_invalidate && way0_hit);
-assign tagv_w1_en = lookup_en || ((replace || refill) && (replace_way == 1'b1)) || (uncached_hit_invalidate && way1_hit);
-//assign tagv_w0_we = refill && (replace_way == 1'b0) && ret_valid && (refill_word_counter == reg_offset[3:2]);
-//assign tagv_w1_we = refill && (replace_way == 1'b1) && ret_valid && (refill_word_counter == reg_offset[3:2]);
-assign tagv_w0_we = (refill && (replace_way == 1'b0) && ret_valid && (refill_word_counter == reg_offset[3:2])) || (uncached_hit_invalidate && way0_hit);
-assign tagv_w1_we = (refill && (replace_way == 1'b1) && ret_valid && (refill_word_counter == reg_offset[3:2])) || (uncached_hit_invalidate && way1_hit);
-//assign tagv_wdata = {reg_tag, 1'b1};
-// 如果是 Uncached 写命中，则写入 Valid=0，否则写入 Valid=1
-assign tagv_wdata = {reg_tag, ~uncached_hit_invalidate};
-assign tagv_addr  = {8{lookup_en}} & index | {8{replace || refill}} & reg_index;
-
-assign data_w0_b0_en = lookup_en && (offset[3:2] == 2'b00) || hitwrite && (write_way == 1'b0) || (replace || refill) && (replace_way == 1'b0);
-assign data_w0_b1_en = lookup_en && (offset[3:2] == 2'b01) || hitwrite && (write_way == 1'b0) || (replace || refill) && (replace_way == 1'b0);
-assign data_w0_b2_en = lookup_en && (offset[3:2] == 2'b10) || hitwrite && (write_way == 1'b0) || (replace || refill) && (replace_way == 1'b0);
-assign data_w0_b3_en = lookup_en && (offset[3:2] == 2'b11) || hitwrite && (write_way == 1'b0) || (replace || refill) && (replace_way == 1'b0);
-assign data_w1_b0_en = lookup_en && (offset[3:2] == 2'b00) || hitwrite && (write_way == 1'b1) || (replace || refill) && (replace_way == 1'b1);
-assign data_w1_b1_en = lookup_en && (offset[3:2] == 2'b01) || hitwrite && (write_way == 1'b1) || (replace || refill) && (replace_way == 1'b1);
-assign data_w1_b2_en = lookup_en && (offset[3:2] == 2'b10) || hitwrite && (write_way == 1'b1) || (replace || refill) && (replace_way == 1'b1);
-assign data_w1_b3_en = lookup_en && (offset[3:2] == 2'b11) || hitwrite && (write_way == 1'b1) || (replace || refill) && (replace_way == 1'b1);
-
-assign data_w0_b0_we = {4{hitwrite && (write_way == 1'b0) && (write_bank == 2'b00)}} & write_strb | {4{refill && (replace_way == 1'b0) && (refill_word_counter == 2'b00) && ret_valid}};
-assign data_w0_b1_we = {4{hitwrite && (write_way == 1'b0) && (write_bank == 2'b01)}} & write_strb | {4{refill && (replace_way == 1'b0) && (refill_word_counter == 2'b01) && ret_valid}};
-assign data_w0_b2_we = {4{hitwrite && (write_way == 1'b0) && (write_bank == 2'b10)}} & write_strb | {4{refill && (replace_way == 1'b0) && (refill_word_counter == 2'b10) && ret_valid}};
-assign data_w0_b3_we = {4{hitwrite && (write_way == 1'b0) && (write_bank == 2'b11)}} & write_strb | {4{refill && (replace_way == 1'b0) && (refill_word_counter == 2'b11) && ret_valid}};
-assign data_w1_b0_we = {4{hitwrite && (write_way == 1'b1) && (write_bank == 2'b00)}} & write_strb | {4{refill && (replace_way == 1'b1) && (refill_word_counter == 2'b00) && ret_valid}};
-assign data_w1_b1_we = {4{hitwrite && (write_way == 1'b1) && (write_bank == 2'b01)}} & write_strb | {4{refill && (replace_way == 1'b1) && (refill_word_counter == 2'b01) && ret_valid}};
-assign data_w1_b2_we = {4{hitwrite && (write_way == 1'b1) && (write_bank == 2'b10)}} & write_strb | {4{refill && (replace_way == 1'b1) && (refill_word_counter == 2'b10) && ret_valid}};
-assign data_w1_b3_we = {4{hitwrite && (write_way == 1'b1) && (write_bank == 2'b11)}} & write_strb | {4{refill && (replace_way == 1'b1) && (refill_word_counter == 2'b11) && ret_valid}};
-
-assign data_wdata    = refill ? refill_word : (hitwrite ? write_data : 32'b0);
-assign data_addr     = (replace || refill)? reg_index : (hitwrite ? write_index : (lookup_en ? index : 8'b0));
-
-// RAM Instantiations (Keep same as original)
-TAGV_RAM tagv_way0(.addra(tagv_addr), .clka(clk), .dina(tagv_wdata), .douta(tagv_w0_rdata), .ena(tagv_w0_en), .wea(tagv_w0_we));
-TAGV_RAM tagv_way1(.addra(tagv_addr), .clka(clk), .dina(tagv_wdata), .douta(tagv_w1_rdata), .ena(tagv_w1_en), .wea(tagv_w1_we));
-DATA_RAM data_way0_bank0(.addra(data_addr), .clka(clk), .dina(data_wdata), .douta(data_w0_b0_rdata), .ena(data_w0_b0_en), .wea(data_w0_b0_we));
-DATA_RAM data_way0_bank1(.addra(data_addr), .clka(clk), .dina(data_wdata), .douta(data_w0_b1_rdata), .ena(data_w0_b1_en), .wea(data_w0_b1_we));
-DATA_RAM data_way0_bank2(.addra(data_addr), .clka(clk), .dina(data_wdata), .douta(data_w0_b2_rdata), .ena(data_w0_b2_en), .wea(data_w0_b2_we));
-DATA_RAM data_way0_bank3(.addra(data_addr), .clka(clk), .dina(data_wdata), .douta(data_w0_b3_rdata), .ena(data_w0_b3_en), .wea(data_w0_b3_we));
-DATA_RAM data_way1_bank0(.addra(data_addr), .clka(clk), .dina(data_wdata), .douta(data_w1_b0_rdata), .ena(data_w1_b0_en), .wea(data_w1_b0_we));
-DATA_RAM data_way1_bank1(.addra(data_addr), .clka(clk), .dina(data_wdata), .douta(data_w1_b1_rdata), .ena(data_w1_b1_en), .wea(data_w1_b1_we));
-DATA_RAM data_way1_bank2(.addra(data_addr), .clka(clk), .dina(data_wdata), .douta(data_w1_b2_rdata), .ena(data_w1_b2_en), .wea(data_w1_b2_we));
-DATA_RAM data_way1_bank3(.addra(data_addr), .clka(clk), .dina(data_wdata), .douta(data_w1_b3_rdata), .ena(data_w1_b3_en), .wea(data_w1_b3_we));
-
-// cache and CPU output signal
-// <--- 修改：addr_ok 在 Uncached 且能进 LOOKUP 时也要为高
-assign addr_ok = //(current_state == IDLE) ||
-                 (current_state == LOOKUP) && cache_hit && valid && (~read_write_hazard) && (~load_store_hazard) && (~uncached)||
-                 (current_state == LOOKUP) && reg_uncached && (reg_op == READ &&rd_rdy || reg_op == WRITE &&wr_rdy); 
-
-
-// <--- 修改：data_ok 在 UNCACHED 状态完成时也要为高
-assign data_ok = (current_state == LOOKUP) && (cache_hit || (reg_op == WRITE)) && !reg_uncached ||
-                 (current_state == REFILL) && ret_valid && (refill_word_counter == reg_offset[3:2]) && (reg_op == READ) ||
-                 (current_state == UNCACHED) && ((reg_op == READ && ret_valid) || (reg_op == WRITE && data_finish));
-
-assign rdata   = load_res;
-
-// cache and AXI output signal
-// <--- 修改：rd_req 在 UNCACHED 读时也要为高
-assign rd_req   = (current_state == REPLACE) || (current_state == LOOKUP && reg_uncached && reg_op == READ);
-
-// rd_type, wr_type, addr 选择逻辑修正
-assign rd_type  = (current_state == LOOKUP && reg_uncached) ? WORD : BLOCK;
-
-// 地址选择：如果当前正在处理 Uncached (LOOKUP or UNCACHED)，使用 reg_ 寄存器拼接
-assign rd_addr  = (current_state == LOOKUP && reg_uncached) ? {reg_tag, reg_index, reg_offset} : {reg_tag, reg_index, 4'b0000};
-
-// 修正：wr_req 只在 LOOKUP 状态且确认是 Uncached 写时拉高
-// 或者是写回阶段（MISS状态）
-/*
-reg    dcache_data_prepared;
-always @(posedge clk) begin
-    if(reset) begin
-        dcache_data_prepared <= 1'b0;
-    end else 
-    if(data_prepared) begin
-         dcache_data_prepared <= 1'b1;
-    end else 
-    if(data_finish) begin
-        dcache_data_prepared <= 1'b0;
-    end
-end 
-*/
-assign wr_req   = (current_state == MISS) && replace_block_dirty  ||
-                  (current_state == LOOKUP && reg_uncached && reg_op == WRITE  );
-
-assign wr_type  = (current_state == LOOKUP && reg_uncached) ? 
-                  (reg_wstrb == 4'b1111 ? WORD : 
-                   (reg_wstrb == 4'b0011 || reg_wstrb == 4'b1100) ? HALFWORD : BYTE) : BLOCK;
-
-assign wr_addr  = (current_state == LOOKUP && reg_uncached) ? {reg_tag, reg_index, reg_offset} : 
-                  ({32{replace_way == 1'b0}} & {way0_tag, reg_index, 4'b0000} |
-                   {32{replace_way == 1'b1}} & {way1_tag, reg_index, 4'b0000});
-
-assign wr_wstrb = (current_state == LOOKUP && reg_uncached) ? reg_wstrb : 4'b1111;
-
-assign wr_data  = (current_state == LOOKUP && reg_uncached) ? {96'b0, reg_wdata} : 
-                  ({128{replace_way == 1'b0}} & way0_data |
-                   {128{replace_way == 1'b1}} & way1_data);
-                   
+assign random_val = r_lfsr[7:6];
 
 endmodule

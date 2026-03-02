@@ -46,7 +46,18 @@ module mycpu_core(
     output [31:0] fs_va,
     output ws_reflush,
     output uncached,
-    output data_uncached  
+    output data_uncached  ,
+    output [31:0] es_va,
+    //exp23
+    output                         ms_cacop_req_i,   // 请求 I-Cache
+    output                         ms_cacop_req_d,   // 请求 D-Cache
+    output [ 4:0]                  ms_cacop_op_code, // CACOP 操作码
+    output [31:0]                  ms_cacop_addr,    // CACOP 操作地址 (虚地址)
+    input                          icache_cacop_done,// I-Cache 完成信号
+    input                          dcache_cacop_done, // D-Cache 完成信号
+    output   [2:0]                  size,
+    output   [1:0]                 cacop_op_mode,
+    output                         tlb_excp_cancel_req
 
 );
 reg         reset;
@@ -167,7 +178,7 @@ wire [31:0] csr_asid_rvalue;
 wire [31:0] csr_dmw0_rvalue;
 wire [31:0] csr_dmw1_rvalue;
 
-wire[31:0] fs_va;
+//wire[31:0] fs_va;
 wire[31:0] fs_pa;
 wire[9 :0] fs_asid;
 wire[5 :0] fs_exc_ecode;
@@ -175,7 +186,7 @@ wire[5 :0] es_exc_ecode;
 
 wire[1 :0] fs_plv;
 wire       fs_dmwhit;
-wire[31:0] es_va;
+//wire[31:0] es_va;
 wire[31:0] es_pa;
 wire[1 :0] es_plv;
 wire       es_dmwhit;
@@ -183,6 +194,9 @@ wire[1 :0] es_mmu_en;
 
 //exp21
 wire [2:0] exe_need_mem_forward;
+
+wire ms_need_mem;
+
 // IF stage
 if_stage if_stage(
     .clk            (clk            ),
@@ -245,7 +259,8 @@ MMU IF_mmu(
   .exc_ecode                (fs_exc_ecode),
   .s_asid                   (fs_asid),
   .pa                       (fs_pa),
-  .uncached                 (uncached)
+  .uncached                 (uncached),
+  .tlb_excp_cancel_req      (tlb_excp_cancel_req)
 );
 // ID stage
 id_stage id_stage(
@@ -328,7 +343,10 @@ exe_stage exe_stage(
     .va                     (es_va),
     .pa                     (es_pa),
     .mmu_en                 (es_mmu_en),
-    .exe_need_mem_forward   (exe_need_mem_forward)
+    .exe_need_mem_forward   (exe_need_mem_forward),
+    .ms_need_mem    (ms_need_mem),
+    .size           (size),
+    .cacop_op_mode  (cacop_op_mode)
 );
 
 MMU EXE_mmu(
@@ -352,7 +370,8 @@ MMU EXE_mmu(
     .dmw_hit                (es_dmwhit),
     .plv                    (es_plv),
     .pa                     (es_pa),
-    .uncached               (data_uncached)
+    .uncached               (data_uncached),
+    .tlb_excp_cancel_req    (tlb_excp_cancel_req)
 );
 
 // MEM stage
@@ -381,7 +400,14 @@ mem_stage mem_stage(
     .ms_csr_re       (ms_csr_re),
     .s1_found         (s1_found),
     .s1_index         (s1_index),
-    .ms_tlb_forward   (ms_tlb_forward)
+    .ms_tlb_forward   (ms_tlb_forward),
+    .ms_cacop_req_i   (ms_cacop_req_i),
+    .ms_cacop_req_d   (ms_cacop_req_d),
+    .ms_cacop_op_code (ms_cacop_op_code),
+    .ms_cacop_addr    (ms_cacop_addr),
+    .icache_cacop_done(icache_cacop_done),
+    .dcache_cacop_done(dcache_cacop_done),
+    .ms_need_mem(ms_need_mem)
 );
 // WB stage
 wb_stage wb_stage(
