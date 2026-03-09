@@ -30,9 +30,19 @@ module mem_stage(
     // for tlb
     input                          s1_found,   // from tlb
     input  [ 3:0]                  s1_index,   // from tlb
-    output                         ms_tlb_forward 
+    output                         ms_tlb_forward ,
+    //exp23
+    // [新增] CACOP 接口 (连接到 mycpu_core/top)
+    output                         ms_cacop_req_i,   // 请求 I-Cache
+    output                         ms_cacop_req_d,   // 请求 D-Cache
+    output [ 4:0]                  ms_cacop_op_code, // CACOP 操作码
+    output [31:0]                  ms_cacop_addr,    // CACOP 操作地址 (虚地址)
+    input                          icache_cacop_done,// I-Cache 完成信号
+    input                          dcache_cacop_done, // D-Cache 完成信号
+    output                         ms_need_mem
+    
 );
-wire        ms_need_mem;
+//wire        ms_need_mem;
 wire        ms_mem_we ;
 reg         ms_valid;
 wire        ms_ready_go;
@@ -71,6 +81,9 @@ wire [  8:0] ms_esubcode;
 wire [  5:0] ms_exc_ecode;
 wire        ms_adem;
 
+//exp 23
+wire   ms_inst_cacop;
+wire [ 4:0] ms_cacop_op;
 
 assign {ms_adem,
         ms_exc_ecode,
@@ -86,7 +99,9 @@ assign {ms_adem,
         ms_dest        ,  //68:64
         ms_alu_result  ,  //63:32
         ms_pc         ,    //31:0
-        ms_exception
+        ms_exception   ,
+        ms_inst_cacop   ,
+        ms_cacop_op
        } = es_to_ms_bus_r;
 
 assign ms_to_ws_bus = {ms_inst_tlbsrch,
@@ -141,7 +156,7 @@ assign ms_csr_re = ms_exception[128] & ms_valid;
 //exp14
 assign ms_need_mem    = ms_valid && (ms_res_from_mem || ms_mem_we);
 //exp22
-assign ms_ready_go    = ms_res_from_mem && (data_sram_data_ok_l || (|ms_exc_ecode) || ms_adem || ms_ex)  || ~ms_need_mem || ms_mem_we && (data_sram_data_ok_s || (|ms_exc_ecode) || ms_adem || ms_ex)  ;
+//assign ms_ready_go    = ms_res_from_mem && (data_sram_data_ok_l || (|ms_exc_ecode) || ms_adem || ms_ex)  || ~ms_need_mem || ms_mem_we && (data_sram_data_ok_s || (|ms_exc_ecode) || ms_adem || ms_ex)  ;
 
 assign ms_to_ds_load_op=  ms_load_op != 3'b000 && (~data_sram_data_ok_l);
 
@@ -152,5 +167,30 @@ assign ms_tlbsrch_hit       = s1_found;
 assign ms_tlbsrch_hit_index = s1_index;
 assign ms_tlb_forward       = ((csr_num == `CSR_ASID || csr_num == `CSR_TLBEHI) && 
                                 csr_we || ms_inst_tlbrd ) && ms_valid;
+                                
+//exp23
+// [新增] CACOP 控制逻辑
 
+wire cacop_target_i = (ms_cacop_op[2:0] == 3'b000);
+wire cacop_target_d = (ms_cacop_op[2:0] == 3'b001);
+
+// 输出请求信号：必须有效、无异常、无刷新
+assign ms_cacop_req_i = ms_valid && ms_inst_cacop && cacop_target_i && !ms_ex && !ms_reflush;
+assign ms_cacop_req_d = ms_valid && ms_inst_cacop && cacop_target_d && !ms_ex && !ms_reflush;
+
+// 输出操作码
+//地址来自TLB的虚拟地址
+assign ms_cacop_op_code = ms_cacop_op;
+
+// [新增] CACOP 正在进行且未完成时，需要 Stall
+wire cacop_stall;
+assign cacop_stall =  ms_inst_cacop && !ms_ex && !ms_reflush && (
+    (cacop_target_i && !icache_cacop_done) || 
+    (cacop_target_d && !dcache_cacop_done)
+);
+
+assign ms_ready_go    = ms_res_from_mem && (data_sram_data_ok_l || (|ms_exc_ecode) || ms_adem || ms_ex)  
+                        || (~ms_need_mem && ~ms_inst_cacop) || ms_mem_we && (data_sram_data_ok_s || (|ms_exc_ecode) || ms_adem || ms_ex) 
+                        || ms_inst_cacop && !cacop_stall ;
+assign ms_cacop_addr    = ms_alu_result;
 endmodule

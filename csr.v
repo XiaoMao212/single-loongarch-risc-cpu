@@ -12,9 +12,9 @@ module csr (
     output [31:0]   era_entry,
     output          has_int ,
      // exp18
-    output [ 9:0]      csr_asid_asid,
-    output [18:0]      csr_tlbehi_vppn,
-    output [ 3:0]      csr_tlbidx_index,
+    output reg [ 9:0]      csr_asid_asid,
+    output reg [18:0]      csr_tlbehi_vppn,
+    output reg [ 3:0]      csr_tlbidx_index,
 
     input  tlbsrch_we,
     input  tlbsrch_hit,
@@ -152,9 +152,9 @@ reg  [31:0] time_cnt;
 wire ws_ex_addr_err;
 
 //exp18
-reg [ 9:0] csr_asid_asid;
-reg [18:0] csr_tlbehi_vppn;
-reg [ 3:0] csr_tlbidx_index;
+
+//reg [18:0] csr_tlbehi_vppn;
+//reg [ 3:0] csr_tlbidx_index;
 
 
 // TLBIDX
@@ -185,8 +185,7 @@ reg  [ 1:0] csr_tlbelo1_mat;
 reg         csr_tlbelo1_g;
 reg  [23:0] csr_tlbelo1_ppn;
 
-// ASID
-wire [31:0] csr_asid_rvalue;
+
 //ASIDÓòµÄÎ»¿í
 wire [ 7:0] csr_asid_asidbits;
 
@@ -702,7 +701,7 @@ assign rval_dmw1 = {csr_dmw1_vseg, 1'b0, csr_dmw1_pseg, 19'b0, csr_dmw1_mat, csr
 
 // To MMU
 assign csr_crmd_rvalue = rval_crmd;
-assign csr_asid_rvalue = rval_asid;
+//assign csr_asid_rvalue = rval_asid;
 assign csr_dmw0_rvalue = rval_dmw0;
 assign csr_dmw1_rvalue = rval_dmw1;
 endmodule
